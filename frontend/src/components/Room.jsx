@@ -565,11 +565,14 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
         }
 
         for (let peerId in peersRef.current) {
-          const senderVid = peersRef.current[peerId].getSenders().find(s => s.track?.kind === 'video');
+          const senders = peersRef.current[peerId].getSenders();
+          // Find video sender — track may be null if camera was turned off
+          const senderVid = senders.find(s => s.track?.kind === 'video') 
+                         || senders.find(s => s.track === null);
           if (senderVid && videoTrack) senderVid.replaceTrack(videoTrack).catch(e=>console.warn(e));
 
           if (trackToSend) {
-             const senderAud = peersRef.current[peerId].getSenders().find(s => s.track?.kind === 'audio');
+             const senderAud = senders.find(s => s.track?.kind === 'audio');
              if (senderAud) senderAud.replaceTrack(trackToSend).catch(e=>console.warn(e));
           }
         }

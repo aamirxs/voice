@@ -20,7 +20,8 @@ const VideoTile = ({ stream, userName, avatarUrl, isVideoOff, isMuted, isPresent
   const hasActiveVideo = stream && typeof stream.getVideoTracks === 'function' && stream.getVideoTracks().length > 0;
   
   // Show avatar if explicitly turned off, OR if we don't have a valid video stream
-  const showAvatar = isVideoOff || !hasActiveVideo;
+  // BUT: if presenting (screen share), always show video regardless of camera state
+  const showAvatar = isPresenting ? false : (isVideoOff || !hasActiveVideo);
 
   return (
     <div className={`video-tile-inner ${isSpeaking ? 'tile-speaking' : ''}`}>
