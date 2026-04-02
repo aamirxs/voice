@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import io from 'socket.io-client';
+import { Camera, Mic, MicOff, PhoneOff, Monitor, MonitorOff, Video, VideoOff, MessageCircle, MessageSquare, Settings, Users, LayoutGrid, MonitorPlay, Sparkles, Smile, PenTool, Check, Link2 } from 'lucide-react';
+import { io } from 'socket.io-client';
+import useAudioVolume from '../hooks/useAudioVolume';
+import VideoTile from './VideoTile';
+import Soundbar from './Soundbar';
+import Whiteboard from './Whiteboard';
 import Controls from './Controls';
 import ChatPanel from './ChatPanel';
-import useAudioVolume, { getAudioContext } from '../hooks/useAudioVolume';
-import VideoTile from './VideoTile';
-import { Mic, MicOff, Monitor, Check, Link2, Users, MessageSquare, VideoOff } from 'lucide-react';
+import { getAudioContext } from '../hooks/useAudioVolume';
 
 const SOCKET_SERVER_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
 
@@ -53,6 +56,9 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
   const [presenterIds, setPresenterIds] = useState([]); // array of 'local' or peer ids
   const [pinnedUser, setPinnedUser] = useState(null);
 
+  // Audio mute tracking
+  const [peerAudioStates, setPeerAudioStates] = useState({});
+
   // Clear pinned user if they leave
   useEffect(() => {
     if (pinnedUser && pinnedUser !== 'local' && !peers[pinnedUser]) {
@@ -71,6 +77,9 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
 
   // Participants panel
   const [isParticipantsOpen, setIsParticipantsOpen] = useState(false);
+  
+  // Whiteboard
+  const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(false);
   
   const isSpeaking = useAudioVolume(localStream);
 
@@ -202,6 +211,8 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
       socket.on('user-toggled-media', (payload) => {
         if (payload.type === 'video') {
            setPeerVideoStates(prev => ({ ...prev, [payload.userId]: payload.isMuted }));
+        } else if (payload.type === 'audio') {
+           setPeerAudioStates(prev => ({ ...prev, [payload.userId]: payload.isMuted }));
         } else if (payload.type === 'screen') {
            if (payload.isMuted) {
              setPresenterIds(prev => prev.includes(payload.userId) ? prev : [...prev, payload.userId]);
@@ -215,6 +226,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
         setPeerNames(prev => ({ ...prev, [userId]: newUserName }));
         setPeerAvatars(prev => ({ ...prev, [userId]: newAvatarUrl }));
         socket.emit('toggle-media', 'video', isVideoOffRef.current);
+        socket.emit('toggle-media', 'audio', isMuted);
         if (isScreenSharingRef.current) socket.emit('toggle-media', 'screen', true);
         
         const peerConnection = createPeerConnection(userId, stream);
@@ -232,6 +244,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
         setPeerNames(prev => ({ ...prev, [payload.caller]: payload.callerName }));
         setPeerAvatars(prev => ({ ...prev, [payload.caller]: payload.callerAvatar }));
         socket.emit('toggle-media', 'video', isVideoOffRef.current);
+        socket.emit('toggle-media', 'audio', isMuted);
         if (isScreenSharingRef.current) socket.emit('toggle-media', 'screen', true);
 
         const peerConnection = createPeerConnection(payload.caller, stream);
@@ -423,6 +436,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     const newState = !isMuted;
     setIsMuted(newState);
     localStreamRef.current.getAudioTracks()[0].enabled = !newState;
+    if (socketRef.current) socketRef.current.emit('toggle-media', 'audio', newState);
   };
 
   const toggleVideo = () => {
@@ -563,13 +577,13 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
 
   // Derive active layout from layoutMode
   const hasScreenShare = presenterIds.length > 0;
-  const activeLayout = layoutMode === 'auto' 
-    ? (hasScreenShare || pinnedUser ? 'sidebar' : 'tiled') 
-    : layoutMode;
+  const activeLayout = (layoutMode === 'auto') 
+    ? (isWhiteboardOpen || hasScreenShare || pinnedUser ? 'sidebar' : 'tiled') 
+    : (isWhiteboardOpen && layoutMode === 'tiled' ? 'sidebar' : layoutMode);
 
   // Resolve main stage user (used by sidebar & spotlight)
   const activePresenters = presenterIds;
-  const mainStageId = pinnedUser || (activePresenters.length > 0 ? activePresenters[0] : (peerIds.length > 0 ? peerIds[0] : 'local'));
+  const mainStageId = isWhiteboardOpen ? 'whiteboard' : (pinnedUser || (activePresenters.length > 0 ? activePresenters[0] : (peerIds.length > 0 ? peerIds[0] : 'local')));
 
   // All participant IDs for tiled layout
   const allUserIds = ['local', ...peerIds];
@@ -665,7 +679,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
                     userName={getPresenterName(id)} 
                     avatarUrl={peerAvatars[id]}
                     isVideoOff={peerVideoStates[id]}
-                    isMuted={false}
+                    isMuted={peerAudioStates[id]}
                     isPresenting={presenterIds.includes(id)}
                     variant="tiled"
                   />
@@ -700,7 +714,9 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
               onDoubleClick={() => setPinnedUser(null)}
               title="Double click to unpin"
             >
-              {mainStageId === 'local' ? (
+              {mainStageId === 'whiteboard' ? (
+                 <Whiteboard socket={socketRef.current} isHost={isHost} onClose={() => setIsWhiteboardOpen(false)} />
+              ) : mainStageId === 'local' ? (
                  presenterIds.includes('local') ? (
                    <>
                      <video ref={localScreenCallback} autoPlay muted playsInline className="screen-share-video" />
@@ -738,7 +754,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
                      userName={presenterIds.includes(mainStageId) ? `${getPresenterName(mainStageId)}'s Screen` : `${getPresenterName(mainStageId)} ${pinnedUser === mainStageId ? '(Pinned)' : ''}`}
                      avatarUrl={peerAvatars[mainStageId]}
                      isVideoOff={!presenterIds.includes(mainStageId) && peerVideoStates[mainStageId]} 
-                     isMuted={false}
+                     isMuted={peerAudioStates[mainStageId]}
                      isPresenting={presenterIds.includes(mainStageId)}
                      variant="main"
                    />
@@ -787,7 +803,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
                         userName={presenterIds.includes(id) ? `${getPresenterName(id)}'s Screen` : getPresenterName(id)} 
                         avatarUrl={peerAvatars[id]}
                         isVideoOff={!presenterIds.includes(id) && peerVideoStates[id]}
-                        isMuted={false}
+                        isMuted={peerAudioStates[id]}
                         isPresenting={presenterIds.includes(id)}
                         variant="pip"
                       />
@@ -806,7 +822,9 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
             onDoubleClick={() => setPinnedUser(null)}
             title="Double click to unpin"
           >
-            {mainStageId === 'local' ? (
+            {mainStageId === 'whiteboard' ? (
+              <Whiteboard socket={socketRef.current} isHost={isHost} onClose={() => setIsWhiteboardOpen(false)} />
+            ) : mainStageId === 'local' ? (
               <>
                 {isVideoOff ? (
                   <div className="avatar-center">
@@ -828,7 +846,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
                 userName={`${getPresenterName(mainStageId)} (Spotlight)`}
                 avatarUrl={peerAvatars[mainStageId]}
                 isVideoOff={peerVideoStates[mainStageId]} 
-                isMuted={false}
+                isMuted={peerAudioStates[mainStageId]}
                 isPresenting={presenterIds.includes(mainStageId)}
                 variant="main"
               />
@@ -878,6 +896,15 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
             {linkCopied ? <Check size={16} /> : <Link2 size={16} />}
             <span>{linkCopied ? 'Copied!' : 'Share'}</span>
           </button>
+          
+          <button 
+            className={`chat-toggle-btn ${isWhiteboardOpen ? 'chat-toggle-active' : ''}`} 
+            onClick={() => setIsWhiteboardOpen(!isWhiteboardOpen)}
+            title="Graffiti Board"
+          >
+            <PenTool size={16} />
+          </button>
+
           <button className={`chat-toggle-btn ${isChatOpen ? 'chat-toggle-active' : ''}`} onClick={() => { const next = !isChatOpen; setIsChatOpen(next); isChatOpenRef.current = next; if (next) setUnreadChat(0); setIsParticipantsOpen(false); }}>
             <MessageSquare size={18} />
             {unreadChat > 0 && <span className="chat-badge">{unreadChat}</span>}

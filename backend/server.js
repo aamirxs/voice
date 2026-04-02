@@ -26,7 +26,8 @@ io.on('connection', (socket) => {
       rooms[roomId] = {
         originalCreatorToken: userToken,
         currentHostSocket: socket.id,
-        participants: []
+        participants: [],
+        whiteboardState: [] // Array of draw actions
       };
     } else if (rooms[roomId].originalCreatorToken === userToken) {
       rooms[roomId].currentHostSocket = socket.id;
@@ -35,6 +36,11 @@ io.on('connection', (socket) => {
     }
     
     rooms[roomId].participants.push({ id: socket.id, token: userToken, name: userName });
+    
+    // Send existing whiteboard state to the newly joined user
+    if (rooms[roomId].whiteboardState.length > 0) {
+      socket.emit('whiteboard-state', rooms[roomId].whiteboardState);
+    }
     
     socket.to(roomId).emit('user-connected', socket.id, userName, avatarUrl);
     io.to(roomId).emit('update-host', rooms[roomId].currentHostSocket);
@@ -80,6 +86,25 @@ io.on('connection', (socket) => {
 
     socket.on('chat-pin', (data) => {
       socket.to(roomId).emit('chat-pin', data);
+    });
+
+    // Whiteboard events
+    socket.on('draw-line', (lineData) => {
+      if (rooms[roomId]) {
+        rooms[roomId].whiteboardState.push(lineData);
+        // Only keep the last 5000 lines to prevent memory leaks / huge payloads
+        if (rooms[roomId].whiteboardState.length > 5000) {
+           rooms[roomId].whiteboardState.shift();
+        }
+        socket.to(roomId).emit('draw-line', lineData);
+      }
+    });
+
+    socket.on('clear-board', () => {
+      if (rooms[roomId] && rooms[roomId].currentHostSocket === socket.id) {
+        rooms[roomId].whiteboardState = [];
+        io.to(roomId).emit('clear-board');
+      }
     });
 
     // Host actions
