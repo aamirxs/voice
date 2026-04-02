@@ -7,6 +7,7 @@ COPY . .
 # We accept the socket URL as an argument during the build process
 ARG VITE_SOCKET_URL
 ENV VITE_SOCKET_URL=$VITE_SOCKET_URL
+ENV NODE_OPTIONS="--max-old-space-size=512"
 RUN npm run build
 
 # Production Stage - Nginx
