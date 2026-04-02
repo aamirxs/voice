@@ -167,10 +167,14 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
   const spawnEmoji = useCallback((emoji, senderName) => {
     const id = emojiIdRef.current++;
     const left = 15 + Math.random() * 70;
-    setFloatingEmojis(prev => [...prev, { id, emoji, senderName, left }]);
+    const size = 1.8 + Math.random() * 1.5;
+    const rotation = (Math.random() - 0.5) * 60;
+    const drift = (Math.random() - 0.5) * 100;
+    
+    setFloatingEmojis(prev => [...prev, { id, emoji, senderName, left, size, rotation, drift }]);
     setTimeout(() => {
       setFloatingEmojis(prev => prev.filter(e => e.id !== id));
-    }, 3000);
+    }, 3800);
   }, []);
 
   const sendEmoji = useCallback((emoji) => {
@@ -618,8 +622,17 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
 
       {/* ===== FLOATING EMOJI REACTIONS ===== */}
       <div className="emoji-overlay">
-        {floatingEmojis.map(({ id, emoji, senderName, left }) => (
-          <div key={id} className="floating-emoji" style={{ left: `${left}%` }}>
+        {floatingEmojis.map(({ id, emoji, senderName, left, size, rotation, drift }) => (
+          <div 
+            key={id} 
+            className="floating-emoji" 
+            style={{ 
+              left: `${left}%`,
+              '--size': `${size}rem`,
+              '--rotation': `${rotation}deg`,
+              '--drift': `${drift}px`
+            }}
+          >
             <span className="emoji-char">{emoji}</span>
             <span className="emoji-sender">{senderName}</span>
           </div>
