@@ -584,7 +584,8 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
   const peerIds = Object.keys(peerNames);
   const hasPeers = peerIds.length > 0;
   
-  
+  // Derive active layout from layoutMode
+  const hasScreenShare = presenterIds.length > 0;
   const activeLayout = (layoutMode === 'auto') 
     ? (isWhiteboardOpen || hasScreenShare || pinnedUser ? 'sidebar' : 'tiled') 
     : (isWhiteboardOpen && layoutMode === 'tiled' ? 'sidebar' : layoutMode);
