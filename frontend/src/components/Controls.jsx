@@ -38,6 +38,8 @@ const Controls = ({
   const moreMenuRef = useRef(null);
   const micMenuRef = useRef(null);
   const videoMenuRef = useRef(null);
+  const emojiRef = useRef(null);
+  const soundbarRef = useRef(null);
 
   // Close menus on outside click
   useEffect(() => {
@@ -45,6 +47,8 @@ const Controls = ({
       if (moreMenuRef.current && !moreMenuRef.current.contains(e.target)) setShowMoreMenu(false);
       if (micMenuRef.current && !micMenuRef.current.contains(e.target)) setShowMicMenu(false);
       if (videoMenuRef.current && !videoMenuRef.current.contains(e.target)) setShowVideoMenu(false);
+      if (emojiRef.current && !emojiRef.current.contains(e.target)) setShowEmojiPicker(false);
+      if (soundbarRef.current && !soundbarRef.current.contains(e.target)) setShowSoundbar(false);
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -120,7 +124,7 @@ const Controls = ({
       </button>
 
       {/* Emoji Picker */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative' }} ref={emojiRef}>
         {showEmojiPicker && (
           <div className="emoji-picker-popup">
             {emojis.map((emoji, i) => (
@@ -143,7 +147,7 @@ const Controls = ({
       </div>
 
       {/* Soundboard */}
-      <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative' }} ref={soundbarRef}>
         {showSoundbar && <Soundbar onPlaySound={(id) => { onPlaySound(id); setShowSoundbar(false); }} />}
         <button className="ctrl-btn" onClick={() => { closeAllPopups(); setShowSoundbar(!showSoundbar); }}>
           <Wand2 size={20} />

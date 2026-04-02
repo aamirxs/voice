@@ -36,6 +36,9 @@ const Whiteboard = ({ socket, isHost, onClose }) => {
     socket.on('clear-board', handleClearBoard);
     socket.on('whiteboard-state', handleWhiteboardState);
 
+    // Request current state so re-opening whiteboard restores previous drawing
+    socket.emit('request-whiteboard-state');
+
     return () => {
       socket.off('draw-line', handleDrawLine);
       socket.off('clear-board', handleClearBoard);

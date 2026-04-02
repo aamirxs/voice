@@ -18,16 +18,33 @@ const rooms = {};
 
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
+  let currentRoomId = null;
+  let currentUserName = null;
+
+  // WebRTC signaling — registered ONCE per connection (not per join-room)
+  socket.on('offer', (payload) => {
+    io.to(payload.target).emit('offer', payload);
+  });
+
+  socket.on('answer', (payload) => {
+    io.to(payload.target).emit('answer', payload);
+  });
+
+  socket.on('ice-candidate', (payload) => {
+    io.to(payload.target).emit('ice-candidate', payload);
+  });
 
   socket.on('join-room', (roomId, userName, avatarUrl, userToken) => {
     socket.join(roomId);
+    currentRoomId = roomId;
+    currentUserName = userName;
     
     if (!rooms[roomId]) {
       rooms[roomId] = {
         originalCreatorToken: userToken,
         currentHostSocket: socket.id,
         participants: [],
-        whiteboardState: [] // Array of draw actions
+        whiteboardState: []
       };
     } else if (rooms[roomId].originalCreatorToken === userToken) {
       rooms[roomId].currentHostSocket = socket.id;
@@ -44,97 +61,104 @@ io.on('connection', (socket) => {
     
     socket.to(roomId).emit('user-connected', socket.id, userName, avatarUrl);
     io.to(roomId).emit('update-host', rooms[roomId].currentHostSocket);
+  });
     
-    // WebRTC signaling
-    socket.on('offer', (payload) => {
-      io.to(payload.target).emit('offer', payload);
+  // Custom events
+  socket.on('play-sound', (data) => {
+    if (!currentRoomId) return;
+    // Forward the full payload consistently
+    socket.to(currentRoomId).emit('play-sound', { 
+      userId: socket.id, 
+      soundData: data.soundData, 
+      senderName: data.senderName 
     });
+  });
 
-    socket.on('answer', (payload) => {
-      io.to(payload.target).emit('answer', payload);
-    });
+  socket.on('toggle-media', (type, isMuted) => {
+    if (!currentRoomId) return;
+    socket.to(currentRoomId).emit('user-toggled-media', { userId: socket.id, type, isMuted });
+  });
 
-    socket.on('ice-candidate', (payload) => {
-      io.to(payload.target).emit('ice-candidate', payload);
-    });
-    
-    // Custom events
-    socket.on('play-sound', (soundId) => {
-      socket.to(roomId).emit('play-sound', { userId: socket.id, soundId });
-    });
+  socket.on('emoji-reaction', (data) => {
+    if (!currentRoomId) return;
+    socket.to(currentRoomId).emit('emoji-reaction', { userId: socket.id, emoji: data.emoji, senderName: data.senderName });
+  });
 
-    socket.on('toggle-media', (type, isMuted) => {
-      socket.to(roomId).emit('user-toggled-media', { userId: socket.id, type, isMuted });
-    });
+  // Chat events
+  socket.on('chat-message', (data) => {
+    if (!currentRoomId) return;
+    socket.to(currentRoomId).emit('chat-message', { ...data, userId: socket.id });
+  });
 
-    socket.on('emoji-reaction', (data) => {
-      socket.to(roomId).emit('emoji-reaction', { userId: socket.id, emoji: data.emoji, senderName: data.senderName });
-    });
+  socket.on('chat-reaction', (data) => {
+    if (!currentRoomId) return;
+    socket.to(currentRoomId).emit('chat-reaction', { ...data, userId: socket.id });
+  });
 
-    // Chat events
-    socket.on('chat-message', (data) => {
-      socket.to(roomId).emit('chat-message', { ...data, userId: socket.id });
-    });
+  socket.on('chat-delete', (data) => {
+    if (!currentRoomId) return;
+    socket.to(currentRoomId).emit('chat-delete', data);
+  });
 
-    socket.on('chat-reaction', (data) => {
-      socket.to(roomId).emit('chat-reaction', { ...data, userId: socket.id });
-    });
+  socket.on('chat-pin', (data) => {
+    if (!currentRoomId) return;
+    socket.to(currentRoomId).emit('chat-pin', data);
+  });
 
-    socket.on('chat-delete', (data) => {
-      socket.to(roomId).emit('chat-delete', data);
-    });
+  // Whiteboard events
+  socket.on('draw-line', (lineData) => {
+    if (!currentRoomId || !rooms[currentRoomId]) return;
+    rooms[currentRoomId].whiteboardState.push(lineData);
+    if (rooms[currentRoomId].whiteboardState.length > 5000) {
+       rooms[currentRoomId].whiteboardState.shift();
+    }
+    socket.to(currentRoomId).emit('draw-line', lineData);
+  });
 
-    socket.on('chat-pin', (data) => {
-      socket.to(roomId).emit('chat-pin', data);
-    });
+  socket.on('clear-board', () => {
+    if (!currentRoomId || !rooms[currentRoomId]) return;
+    if (rooms[currentRoomId].currentHostSocket === socket.id) {
+      rooms[currentRoomId].whiteboardState = [];
+      io.to(currentRoomId).emit('clear-board');
+    }
+  });
 
-    // Whiteboard events
-    socket.on('draw-line', (lineData) => {
-      if (rooms[roomId]) {
-        rooms[roomId].whiteboardState.push(lineData);
-        // Only keep the last 5000 lines to prevent memory leaks / huge payloads
-        if (rooms[roomId].whiteboardState.length > 5000) {
-           rooms[roomId].whiteboardState.shift();
-        }
-        socket.to(roomId).emit('draw-line', lineData);
+  // Request whiteboard state (for re-opening whiteboard within same session)
+  socket.on('request-whiteboard-state', () => {
+    if (!currentRoomId || !rooms[currentRoomId]) return;
+    if (rooms[currentRoomId].whiteboardState.length > 0) {
+      socket.emit('whiteboard-state', rooms[currentRoomId].whiteboardState);
+    }
+  });
+
+  // Host actions
+  socket.on('host-action-mute', (targetId) => {
+    if (!currentRoomId) return;
+    if (rooms[currentRoomId]?.currentHostSocket === socket.id) {
+      io.to(targetId).emit('force-mute');
+    }
+  });
+
+  socket.on('host-action-kick', (targetId) => {
+    if (!currentRoomId) return;
+    if (rooms[currentRoomId]?.currentHostSocket === socket.id) {
+      io.to(targetId).emit('force-kick');
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`User disconnected: ${socket.id} (user: ${currentUserName})`);
+    if (currentRoomId && rooms[currentRoomId]) {
+      rooms[currentRoomId].participants = rooms[currentRoomId].participants.filter(p => p.id !== socket.id);
+      
+      if (rooms[currentRoomId].participants.length === 0) {
+        delete rooms[currentRoomId];
+      } else if (rooms[currentRoomId].currentHostSocket === socket.id) {
+        rooms[currentRoomId].currentHostSocket = rooms[currentRoomId].participants[0].id;
+        io.to(currentRoomId).emit('update-host', rooms[currentRoomId].currentHostSocket);
       }
-    });
-
-    socket.on('clear-board', () => {
-      if (rooms[roomId] && rooms[roomId].currentHostSocket === socket.id) {
-        rooms[roomId].whiteboardState = [];
-        io.to(roomId).emit('clear-board');
-      }
-    });
-
-    // Host actions
-    socket.on('host-action-mute', (targetId) => {
-      if (rooms[roomId]?.currentHostSocket === socket.id) {
-        io.to(targetId).emit('force-mute');
-      }
-    });
-
-    socket.on('host-action-kick', (targetId) => {
-      if (rooms[roomId]?.currentHostSocket === socket.id) {
-        io.to(targetId).emit('force-kick'); // The client will disconnect itself
-      }
-    });
-
-    socket.on('disconnect', () => {
-      console.log(`User disconnected: ${socket.id} (user: ${userName})`);
-      if (rooms[roomId]) {
-        rooms[roomId].participants = rooms[roomId].participants.filter(p => p.id !== socket.id);
-        
-        if (rooms[roomId].participants.length === 0) {
-          delete rooms[roomId]; // Cleanup empty room
-        } else if (rooms[roomId].currentHostSocket === socket.id) {
-          // Promote next oldest member
-          rooms[roomId].currentHostSocket = rooms[roomId].participants[0].id;
-          io.to(roomId).emit('update-host', rooms[roomId].currentHostSocket);
-        }
-      }
-      socket.to(roomId).emit('user-disconnected', socket.id);
-    });
+      socket.to(currentRoomId).emit('user-disconnected', socket.id);
+    }
   });
 });
 

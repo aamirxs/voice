@@ -3,7 +3,10 @@ import Room from './components/Room';
 import { Video, Link2, Copy, Check, Sparkles, Shield, Zap, RefreshCw } from 'lucide-react';
 import './index.css';
 
-const generateToken = () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+const generateToken = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return Math.random().toString(36).substring(2, 15) + Date.now().toString(36) + Math.random().toString(36).substring(2, 15);
+};
 
 function App() {
   const [roomId, setRoomId] = useState('');

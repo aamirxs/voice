@@ -26,7 +26,7 @@ const ChatPanel = ({ isOpen, onClose, socket, userName, avatarUrl, unreadCount, 
       setTimeout(() => inputRef.current?.focus(), 200);
       onResetUnread?.();
     }
-  }, [isOpen, onResetUnread]);
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Listen for incoming messages & reactions
   useEffect(() => {

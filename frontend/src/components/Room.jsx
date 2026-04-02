@@ -43,6 +43,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
   const [hostId, setHostId] = useState(null);
   
   const [isMuted, setIsMuted] = useState(false);
+  const isMutedRef = useRef(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const isVideoOffRef = useRef(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -203,8 +204,9 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
       });
 
       socket.on('force-mute', () => {
-        if (!isMuted) {
+        if (!isMutedRef.current) {
           setIsMuted(true);
+          isMutedRef.current = true;
           const tracks = localStreamRef.current?.getAudioTracks() || [];
           tracks.forEach(track => { track.enabled = false; });
           socket.emit('toggle-media', 'audio', true);
@@ -307,17 +309,18 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
           return newPeers;
         });
         setPeerNames(prev => { const n = {...prev}; delete n[userId]; return n; });
+        setPeerAvatars(prev => { const n = {...prev}; delete n[userId]; return n; });
         setPeerVideoStates(prev => { const n = {...prev}; delete n[userId]; return n; });
+        setPeerAudioStates(prev => { const n = {...prev}; delete n[userId]; return n; });
         setPresenterIds(prev => prev.filter(id => id !== userId));
         delete peersRef.current[userId];
         delete iceCandidateQueue.current[userId];
       });
 
       socket.on('play-sound', (payload) => {
-         // Server wraps our custom object in { userId, soundId: { soundData, senderName } }
-         const data = payload.soundId || payload;
-         playSound(data.soundData);
-         spawnEmoji(getSoundEmoji(data.soundData), data.senderName || 'Someone');
+         // Server sends { userId, soundData, senderName }
+         playSound(payload.soundData);
+         spawnEmoji(getSoundEmoji(payload.soundData), payload.senderName || 'Someone');
       });
 
       // Emoji reactions from peers
@@ -468,6 +471,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     }
     const newState = !isMuted;
     setIsMuted(newState);
+    isMutedRef.current = newState;
     localStreamRef.current.getAudioTracks()[0].enabled = !newState;
     if (socketRef.current) socketRef.current.emit('toggle-media', 'audio', newState);
   };
@@ -504,7 +508,10 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
 
         // Replace the track in all active peer connections so remote users see your camera again
         for (let peerId in peersRef.current) {
-          const sender = peersRef.current[peerId].getSenders().find(s => s.track?.kind === 'video' || (s.track === null && s !== undefined));
+          const senders = peersRef.current[peerId].getSenders();
+          // Find the video sender — may have a null track if camera was off
+          const sender = senders.find(s => s.track?.kind === 'video') 
+                      || senders.find(s => s.track === null && !senders.find(a => a.track?.kind === 'audio' && a === s));
           if (sender) {
             sender.replaceTrack(newVideoTrack).catch(e => console.warn('replaceTrack failed:', e));
           }
@@ -605,14 +612,18 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
          mixedAudioContextRef.current = null;
      }
      
+     // Restore camera track to peers (may be null if camera was off before screen share)
      const videoTrack = localStreamRef.current?.getVideoTracks()[0];
      const audioTrack = localStreamRef.current?.getAudioTracks()[0];
      for (let peerId in peersRef.current) {
-        const senderVid = peersRef.current[peerId].getSenders().find(s => s.track?.kind === 'video');
-        if (senderVid && videoTrack) {
-           senderVid.replaceTrack(videoTrack).catch(e=>console.warn(e));
+        const senders = peersRef.current[peerId].getSenders();
+        // Current sender is sending the screen share video track — swap back to camera (or null if cam off)
+        const senderVid = senders.find(s => s.track?.kind === 'video')
+                       || senders.find(s => s.track === null);
+        if (senderVid) {
+           senderVid.replaceTrack(videoTrack || null).catch(e=>console.warn(e));
         }
-        const senderAud = peersRef.current[peerId].getSenders().find(s => s.track?.kind === 'audio');
+        const senderAud = senders.find(s => s.track?.kind === 'audio');
         if (senderAud && audioTrack) {
            senderAud.replaceTrack(audioTrack).catch(e=>console.warn(e));
         }
