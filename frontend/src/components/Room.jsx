@@ -576,11 +576,15 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     if (socketRef.current) socketRef.current.emit('play-sound', { soundData, senderName: userName });
   };
 
-  const peerIds = Object.keys(peers);
+  // Track the unread message dot
+  const hasUnread = messageCountRef.current > messages.length && !isChatOpen;
+  
+  // Decide which user IDs to display. Use peerNames as the source of truth so
+  // users are visible even if their WebRTC stream hasn't arrived yet.
+  const peerIds = Object.keys(peerNames);
   const hasPeers = peerIds.length > 0;
-
-  // Derive active layout from layoutMode
-  const hasScreenShare = presenterIds.length > 0;
+  
+  
   const activeLayout = (layoutMode === 'auto') 
     ? (isWhiteboardOpen || hasScreenShare || pinnedUser ? 'sidebar' : 'tiled') 
     : (isWhiteboardOpen && layoutMode === 'tiled' ? 'sidebar' : layoutMode);
