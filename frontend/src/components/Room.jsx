@@ -408,7 +408,24 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        // Free TURN relay servers for NAT traversal across different networks
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
       ],
+      iceCandidatePoolSize: 10,
     });
 
     pc.onicecandidate = (event) => {
@@ -428,6 +445,14 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
 
     if (stream) {
        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    } else {
+      // No local media — still request to receive remote tracks
+      try {
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+      } catch (err) {
+        console.warn('Failed to add recvonly transceivers:', err);
+      }
     }
     return pc;
   };
@@ -443,15 +468,43 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     if (socketRef.current) socketRef.current.emit('toggle-media', 'audio', newState);
   };
 
-  const toggleVideo = () => {
-    if (!localStreamRef.current || localStreamRef.current.getVideoTracks().length === 0) {
-      console.warn('No video track available to toggle');
-      return;
-    }
+  const toggleVideo = async () => {
     const newState = !isVideoOff;
     setIsVideoOff(newState);
     isVideoOffRef.current = newState;
-    localStreamRef.current.getVideoTracks()[0].enabled = !newState;
+
+    if (newState) {
+      // Turning camera OFF: actually stop the video track so the LED turns off
+      const videoTracks = localStreamRef.current?.getVideoTracks() || [];
+      videoTracks.forEach(track => track.stop());
+    } else {
+      // Turning camera ON: re-acquire the video track from hardware
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
+        });
+        const newVideoTrack = newStream.getVideoTracks()[0];
+
+        // Replace the old (stopped) track in the local stream
+        const oldVideoTrack = localStreamRef.current?.getVideoTracks()[0];
+        if (oldVideoTrack) localStreamRef.current.removeTrack(oldVideoTrack);
+        if (localStreamRef.current) localStreamRef.current.addTrack(newVideoTrack);
+
+        // Replace the track in all active peer connections so remote users see your camera again
+        for (let peerId in peersRef.current) {
+          const sender = peersRef.current[peerId].getSenders().find(s => s.track?.kind === 'video' || (s.track === null && s !== undefined));
+          if (sender) {
+            sender.replaceTrack(newVideoTrack).catch(e => console.warn('replaceTrack failed:', e));
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to re-acquire camera:', err);
+        // Revert state if camera can't be re-opened
+        setIsVideoOff(true);
+        isVideoOffRef.current = true;
+      }
+    }
+
     if (socketRef.current) socketRef.current.emit('toggle-media', 'video', newState);
   };
 
