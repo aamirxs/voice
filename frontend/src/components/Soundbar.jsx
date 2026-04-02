@@ -1,14 +1,14 @@
-import React, { useRef } from 'react';
-import { Megaphone, Drum, PartyPopper, Bug, Frown, UploadCloud } from 'lucide-react';
+import React, { useRef, useState, useEffect } from 'react';
+import { Megaphone, Drum, PartyPopper, Bug, Frown, UploadCloud, X } from 'lucide-react';
 
 const Soundbar = ({ onPlaySound }) => {
   const fileInputRef = useRef(null);
+  const [customSoundName, setCustomSoundName] = useState(localStorage.getItem('customSoundName'));
 
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    // Check size limit (e.g., max 2MB as safety net for socket.io base64)
     if (file.size > 2 * 1024 * 1024) {
       alert('File too large. Please select a smaller sound file (under 2MB).');
       return;
@@ -22,19 +22,17 @@ const Soundbar = ({ onPlaySound }) => {
         alert('Custom sound cannot exceed 15 seconds.');
         URL.revokeObjectURL(objectUrl);
       } else {
-        // Safe duration, convert to base64
         const reader = new FileReader();
         reader.onload = (event) => {
           const base64Audio = event.target.result;
-          
-          // Optionally save to localStorage for persistence across reloads
           try {
             localStorage.setItem('customSoundCache', base64Audio);
             localStorage.setItem('customSoundName', file.name);
+            setCustomSoundName(file.name);
           } catch(e) {
              console.warn('LocalStorage limit exceeded, custom sound is session only.');
+             setCustomSoundName(file.name);
           }
-
           onPlaySound({
              type: 'custom',
              base64: base64Audio,
@@ -44,18 +42,25 @@ const Soundbar = ({ onPlaySound }) => {
         };
         reader.readAsDataURL(file);
       }
-      e.target.value = ''; // Reset input
+      e.target.value = ''; 
     });
   };
 
   const playCustomFromCache = () => {
     const cached = localStorage.getItem('customSoundCache');
-    const name = localStorage.getItem('customSoundName') || 'Custom';
     if (cached) {
-      onPlaySound({ type: 'custom', base64: cached, name: name });
+      onPlaySound({ type: 'custom', base64: cached, name: customSoundName || 'Custom' });
     } else {
       fileInputRef.current.click();
     }
+  };
+
+  const clearCustom = (e) => {
+    e.stopPropagation();
+    localStorage.removeItem('customSoundCache');
+    localStorage.removeItem('customSoundName');
+    setCustomSoundName(null);
+    if(fileInputRef.current) fileInputRef.current.value = '';
   };
 
   return (
@@ -97,12 +102,23 @@ const Soundbar = ({ onPlaySound }) => {
 
       <div style={{ width: '1px', background: 'rgba(255,255,255,0.1)', margin: '4px 6px' }}></div>
 
-      <button className="sound-btn" onClick={playCustomFromCache} onContextMenu={(e) => { e.preventDefault(); fileInputRef.current.click(); }} title="Left-click to play cached sound. Right-click to upload new.">
-        <div className="sound-icon-wrapper custom-upload-icon">
-          <UploadCloud size={20} />
-        </div>
-        <span>Custom</span>
-      </button>
+      <div style={{ position: 'relative' }}>
+        {customSoundName && (
+          <button 
+            onClick={clearCustom}
+            style={{ position: 'absolute', top: '-5px', right: '-5px', background: '#e74c3c', borderRadius: '50%', padding: '2px', color: 'white', border: 'none', cursor: 'pointer', zIndex: 10, display: 'flex' }}
+            title="Remove Custom Sound"
+          >
+            <X size={12} />
+          </button>
+        )}
+        <button className="sound-btn" onClick={playCustomFromCache} title={customSoundName ? `Play ${customSoundName}` : "Choose Custom Sound"}>
+          <div className="sound-icon-wrapper custom-upload-icon">
+            <UploadCloud size={20} />
+          </div>
+          <span>{customSoundName ? "Custom" : "Custom"}</span>
+        </button>
+      </div>
 
       <input 
         type="file" 
