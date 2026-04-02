@@ -226,8 +226,26 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
         } else if (payload.type === 'screen') {
            if (payload.isMuted) {
              setPresenterIds(prev => prev.includes(payload.userId) ? prev : [...prev, payload.userId]);
+             // Force-refresh the peer's MediaStream so the <video> element picks up
+             // the new screen-share track that arrived via replaceTrack().
+             // replaceTrack does NOT fire ontrack, so without this the video stays black.
+             setTimeout(() => {
+               setPeers(prev => {
+                 if (!prev[payload.userId]) return prev;
+                 const freshStream = new MediaStream(prev[payload.userId].getTracks());
+                 return { ...prev, [payload.userId]: freshStream };
+               });
+             }, 300);
            } else {
              setPresenterIds(prev => prev.filter(id => id !== payload.userId));
+             // Also refresh stream when screen share stops so video element shows camera again
+             setTimeout(() => {
+               setPeers(prev => {
+                 if (!prev[payload.userId]) return prev;
+                 const freshStream = new MediaStream(prev[payload.userId].getTracks());
+                 return { ...prev, [payload.userId]: freshStream };
+               });
+             }, 300);
            }
         }
       });
@@ -442,9 +460,24 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     };
 
     pc.ontrack = (event) => {
+      const incomingTrack = event.track;
+      
+      // Listen for track unmute — this fires when replaceTrack sends new content
+      // and when tracks initially become active
+      incomingTrack.onunmute = () => {
+        setPeers(oldPeers => {
+          const existing = oldPeers[partnerId];
+          if (existing) {
+            // Re-clone so React sees a new object → video element re-sets srcObject
+            return { ...oldPeers, [partnerId]: new MediaStream(existing.getTracks()) };
+          }
+          return oldPeers;
+        });
+      };
+
       setPeers(oldPeers => {
-        // ALWAYS return a top-level new object so React re-renders.
-        // We also clone the MediaStream to force HTMLMediaElement to recognize the new tracks.
+        // ALWAYS return a new object so React re-renders.
+        // Clone the MediaStream to force HTMLMediaElement to recognize the new tracks.
         const newStream = new MediaStream(event.streams[0].getTracks());
         return { ...oldPeers, [partnerId]: newStream };
       });

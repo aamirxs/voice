@@ -3,13 +3,26 @@ import { MicOff } from 'lucide-react';
 import useAudioVolume from '../hooks/useAudioVolume';
 
 const VideoTile = ({ stream, userName, avatarUrl, isVideoOff, isMuted, isPresenting, variant = 'grid' }) => {
+  const mediaRef = useRef(null);
+
   const mediaCallback = React.useCallback((el) => {
+    mediaRef.current = el;
     if (el && stream) {
-      if (el.srcObject !== stream) {
-        el.srcObject = stream;
-      }
+      // Always re-assign srcObject — new MediaStream objects are created on
+      // screen share toggle to force the element to pick up replaced tracks
+      el.srcObject = stream;
+      // Kick the element to render immediately (autoPlay can stall sometimes)
+      el.play().catch(() => {});
     }
   }, [stream]);
+
+  // When isPresenting changes, force the existing element to re-read the stream
+  useEffect(() => {
+    if (mediaRef.current && stream) {
+      mediaRef.current.srcObject = stream;
+      mediaRef.current.play().catch(() => {});
+    }
+  }, [isPresenting, stream]);
 
   // Temporarily disable useAudioVolume for remote streams to prevent 
   // the known Chrome bug where Web Audio API steals the MediaStream track
