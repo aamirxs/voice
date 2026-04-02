@@ -478,9 +478,14 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     isVideoOffRef.current = newState;
 
     if (newState) {
-      // Turning camera OFF: actually stop the video track so the LED turns off
+      // Turning camera OFF: stop the track AND remove it from the stream
       const videoTracks = localStreamRef.current?.getVideoTracks() || [];
-      videoTracks.forEach(track => track.stop());
+      videoTracks.forEach(track => {
+        track.stop();
+        if (localStreamRef.current) localStreamRef.current.removeTrack(track);
+      });
+      // Force React to re-render the video element (so it unmounts and releases srcObject)
+      setLocalStream(localStreamRef.current ? new MediaStream(localStreamRef.current.getTracks()) : null);
     } else {
       // Turning camera ON: re-acquire the video track from hardware
       try {
@@ -493,6 +498,9 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
         const oldVideoTrack = localStreamRef.current?.getVideoTracks()[0];
         if (oldVideoTrack) localStreamRef.current.removeTrack(oldVideoTrack);
         if (localStreamRef.current) localStreamRef.current.addTrack(newVideoTrack);
+        
+        // Trigger React re-render so the <video> element picks up the new track
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
 
         // Replace the track in all active peer connections so remote users see your camera again
         for (let peerId in peersRef.current) {
