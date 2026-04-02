@@ -24,7 +24,7 @@ const getSoundEmoji = (soundData) => {
   return '🎧';
 };
 
-const Room = ({ roomId, userName, avatarUrl, onLeave, shareLink }) => {
+const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) => {
   const [peers, setPeers] = useState({});
   const [peerNames, setPeerNames] = useState({});
   const [peerAvatars, setPeerAvatars] = useState({});
@@ -33,6 +33,7 @@ const Room = ({ roomId, userName, avatarUrl, onLeave, shareLink }) => {
   const [screenStream, setScreenStream] = useState(null);
   const [linkCopied, setLinkCopied] = useState(false);
   const [mediaError, setMediaError] = useState(null);
+  const [hostId, setHostId] = useState(null);
   
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
@@ -178,7 +179,25 @@ const Room = ({ roomId, userName, avatarUrl, onLeave, shareLink }) => {
     const initRoom = (stream) => {
       if (!isMounted) return;
       
-      socket.emit('join-room', roomId, userName, avatarUrl);
+      socket.emit('join-room', roomId, userName, avatarUrl, userToken);
+
+      socket.on('update-host', (newHostId) => {
+        setHostId(newHostId);
+      });
+
+      socket.on('force-mute', () => {
+        if (!isMuted) {
+          setIsMuted(true);
+          const tracks = localStreamRef.current?.getAudioTracks() || [];
+          tracks.forEach(track => { track.enabled = false; });
+          socket.emit('toggle-media', 'audio', true);
+        }
+      });
+
+      socket.on('force-kick', () => {
+        alert("You have been kicked from the room by the host.");
+        onLeave();
+      });
 
       socket.on('user-toggled-media', (payload) => {
         if (payload.type === 'video') {
@@ -563,6 +582,16 @@ const Room = ({ roomId, userName, avatarUrl, onLeave, shareLink }) => {
     return peerNames[id] || `Guest-${id.substring(0,4)}`;
   };
 
+  const hostActionMute = (peerId) => {
+    if (socketRef.current) socketRef.current.emit('host-action-mute', peerId);
+  };
+
+  const hostActionKick = (peerId) => {
+    if (socketRef.current) socketRef.current.emit('host-action-kick', peerId);
+  };
+
+  const isHost = socketRef.current?.id && hostId === socketRef.current.id;
+
   return (
     <div className="meeting-container">
       {/* ===== MEDIA ERROR BANNER ===== */}
@@ -877,9 +906,16 @@ const Room = ({ roomId, userName, avatarUrl, onLeave, shareLink }) => {
       {/* ===== PARTICIPANTS PANEL ===== */}
       {isParticipantsOpen && (
         <div className="participants-panel">
-          <div className="participants-panel-header">
+          <div className="participants-panel-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
             <span>People ({peerIds.length + 1})</span>
-            <button className="participants-close-btn" onClick={() => setIsParticipantsOpen(false)}>✕</button>
+            <div style={{display:'flex', gap:'8px', alignItems:'center'}}>
+              {isHost && peerIds.length > 0 && (
+                <button onClick={() => peerIds.forEach(id => hostActionMute(id))} style={{ background: '#f59e0b', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: '4px', fontSize: '12px', cursor: 'pointer' }}>
+                  Mute All
+                </button>
+              )}
+              <button className="participants-close-btn" onClick={() => setIsParticipantsOpen(false)}>✕</button>
+            </div>
           </div>
           <div className="participants-list">
             {/* Local user */}
@@ -891,7 +927,7 @@ const Room = ({ roomId, userName, avatarUrl, onLeave, shareLink }) => {
               />
               <div className="participant-info">
                 <span className="participant-name">You ({userName})</span>
-                <span className="participant-role">Host</span>
+                {isHost && <span className="participant-role">Host</span>}
               </div>
               <div className="participant-status">
                 {isMuted ? <MicOff size={14} color="#fbbf24" /> : <Mic size={14} color="#4ade80" />}
@@ -900,19 +936,28 @@ const Room = ({ roomId, userName, avatarUrl, onLeave, shareLink }) => {
 
             {/* Remote peers */}
             {peerIds.map(id => (
-              <div key={id} className="participant-item">
-                <img 
-                  src={peerAvatars[id] || `https://api.dicebear.com/9.x/lorelei/svg?seed=${encodeURIComponent(peerNames[id] || 'Guest')}&scale=120&backgroundColor=b6e3f4,c0aede,d1d4f9`} 
-                  alt={peerNames[id] || 'Guest'}
-                  className="participant-avatar"
-                />
-                <div className="participant-info">
-                  <span className="participant-name">{peerNames[id] || `Guest-${id.substring(0,4)}`}</span>
-                  {presenterIds.includes(id) && <span className="participant-role presenting">Presenting</span>}
+              <div key={id} className="participant-item block-layout" style={{ flexWrap: 'wrap' }}>
+                <div style={{display:'flex', alignItems:'center', width:'100%'}}>
+                  <img 
+                    src={peerAvatars[id] || `https://api.dicebear.com/9.x/lorelei/svg?seed=${encodeURIComponent(peerNames[id] || 'Guest')}&scale=120&backgroundColor=b6e3f4,c0aede,d1d4f9`} 
+                    alt={peerNames[id] || 'Guest'}
+                    className="participant-avatar"
+                  />
+                  <div className="participant-info">
+                    <span className="participant-name">{peerNames[id] || `Guest-${id.substring(0,4)}`}</span>
+                    {hostId === id && <span className="participant-role">Host</span>}
+                    {presenterIds.includes(id) && <span className="participant-role presenting">Presenting</span>}
+                  </div>
+                  <div className="participant-status">
+                    {peerVideoStates[id] && <VideoOff size={14} color="#fbbf24" style={{marginRight: 4}} />}
+                  </div>
                 </div>
-                <div className="participant-status">
-                  {peerVideoStates[id] && <VideoOff size={14} color="#fbbf24" />}
-                </div>
+                {isHost && hostId !== id && (
+                  <div className="host-controls" style={{ display: 'flex', gap: '8px', width: '100%', marginTop: '8px', paddingLeft: '36px' }}>
+                    <button className="host-btn mute-btn" onClick={() => hostActionMute(id)} title="Mute Mic" style={{ background: '#f59e0b', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', cursor: 'pointer' }}>Mute</button>
+                    <button className="host-btn kick-btn" onClick={() => hostActionKick(id)} title="Kick User" style={{ background: '#e74c3c', color: '#fff', border: 'none', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', cursor: 'pointer' }}>Kick</button>
+                  </div>
+                )}
               </div>
             ))}
           </div>

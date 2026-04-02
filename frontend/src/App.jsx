@@ -3,13 +3,23 @@ import Room from './components/Room';
 import { Video, Link2, Copy, Check, Sparkles, Shield, Zap, RefreshCw } from 'lucide-react';
 import './index.css';
 
+const generateToken = () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
 function App() {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
-  const [userName, setUserName] = useState('');
+  const [userName, setUserName] = useState(() => localStorage.getItem('savedUserName') || '');
   const [fromLink, setFromLink] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [avatarSeed, setAvatarSeed] = useState(() => Math.random().toString(36).substring(7));
+  const [avatarSeed, setAvatarSeed] = useState(() => localStorage.getItem('savedAvatarSeed') || Math.random().toString(36).substring(7));
+  const [userToken, setUserToken] = useState(() => {
+    let token = localStorage.getItem('userToken');
+    if (!token) {
+      token = generateToken();
+      localStorage.setItem('userToken', token);
+    }
+    return token;
+  });
 
   const avatarUrl = `https://api.dicebear.com/9.x/lorelei/svg?seed=${avatarSeed}&scale=120&backgroundColor=b6e3f4,c0aede,d1d4f9`;
 
@@ -31,6 +41,8 @@ function App() {
   const joinRoom = (e) => {
     e.preventDefault();
     if (roomId && userName) {
+      localStorage.setItem('savedUserName', userName);
+      localStorage.setItem('savedAvatarSeed', avatarSeed);
       window.history.pushState({}, '', `/room/${roomId}`);
       setJoined(true);
     }
@@ -51,7 +63,7 @@ function App() {
   };
 
   if (joined) {
-    return <Room roomId={roomId} userName={userName} avatarUrl={avatarUrl} onLeave={handleLeave} shareLink={getShareLink()} />;
+    return <Room roomId={roomId} userName={userName} avatarUrl={avatarUrl} userToken={userToken} onLeave={handleLeave} shareLink={getShareLink()} />;
   }
 
   return (
