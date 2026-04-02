@@ -16,9 +16,15 @@ const VideoTile = ({ stream, userName, avatarUrl, isVideoOff, isMuted, isPresent
   // and silences the HTML media element.
   const isSpeaking = false;
 
+  // Ensure we actually have an active video stream to play
+  const hasActiveVideo = stream && typeof stream.getVideoTracks === 'function' && stream.getVideoTracks().length > 0;
+  
+  // Show avatar if explicitly turned off, OR if we don't have a valid video stream
+  const showAvatar = isVideoOff || !hasActiveVideo;
+
   return (
     <div className={`video-tile-inner ${isSpeaking ? 'tile-speaking' : ''}`}>
-      {isVideoOff ? (
+      {showAvatar ? (
         <>
           <div 
             className="avatar-center" 
