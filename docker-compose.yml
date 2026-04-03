@@ -3,11 +3,8 @@ services:
     image: livekit/livekit-server:latest
     container_name: stream-livekit
     restart: unless-stopped
-    command: --config /etc/livekit.yaml --node-ip 0.0.0.0
-    ports:
-      - "7880:7880"
-      - "7881:7881"
-      - "50000-60000:50000-60000/udp"
+    network_mode: host
+    command: --config /etc/livekit.yaml
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml
 
@@ -21,7 +18,7 @@ services:
       - PORT=5000
       - LIVEKIT_API_KEY=APIzora2026stream
       - LIVEKIT_API_SECRET=secretZoraLiveKit2026xRunPlace
-      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_URL=ws://172.17.0.1:7880
     depends_on:
       - livekit
 
