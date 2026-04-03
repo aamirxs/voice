@@ -1,6 +1,5 @@
 import React, { useEffect, useRef } from 'react';
 import { MicOff } from 'lucide-react';
-import useAudioVolume from '../hooks/useAudioVolume';
 
 const VideoTile = ({ stream, userName, avatarUrl, isVideoOff, isMuted, isPresenting, variant = 'grid' }) => {
   const mediaRef = useRef(null);
@@ -8,36 +7,28 @@ const VideoTile = ({ stream, userName, avatarUrl, isVideoOff, isMuted, isPresent
   const mediaCallback = React.useCallback((el) => {
     mediaRef.current = el;
     if (el && stream) {
-      // Always re-assign srcObject — new MediaStream objects are created on
-      // screen share toggle to force the element to pick up replaced tracks
       el.srcObject = stream;
-      // Kick the element to render immediately (autoPlay can stall sometimes)
       el.play().catch(() => {});
     }
   }, [stream]);
 
-  // When isPresenting changes, force the existing element to re-read the stream
+  // Re-set srcObject when stream or presenting state changes
   useEffect(() => {
     if (mediaRef.current && stream) {
       mediaRef.current.srcObject = stream;
       mediaRef.current.play().catch(() => {});
     }
-  }, [isPresenting, stream]);
+  }, [stream, isPresenting]);
 
-  // Temporarily disable useAudioVolume for remote streams to prevent 
-  // the known Chrome bug where Web Audio API steals the MediaStream track
-  // and silences the HTML media element.
-  const isSpeaking = false;
-
-  // Ensure we actually have an active video stream to play
-  const hasActiveVideo = stream && typeof stream.getVideoTracks === 'function' && stream.getVideoTracks().length > 0;
+  // Ensure we actually have an active video stream
+  const hasActiveVideo = stream && typeof stream.getVideoTracks === 'function' 
+    && stream.getVideoTracks().length > 0;
   
-  // Show avatar if explicitly turned off, OR if we don't have a valid video stream
-  // BUT: if presenting (screen share), always show video regardless of camera state
+  // Show avatar if camera off or no video, but always show video if presenting
   const showAvatar = isPresenting ? false : (isVideoOff || !hasActiveVideo);
 
   return (
-    <div className={`video-tile-inner ${isSpeaking ? 'tile-speaking' : ''}`}>
+    <div className={`video-tile-inner`}>
       {showAvatar ? (
         <>
           <div 

@@ -1,0 +1,2 @@
+GroupId,GroupName,VpcId,Description,OwnerId,InboundRulesCount,OutboundRulesCount,Tags
+sg-0b8d11744bed849dc,web server,vpc-063ece6fbe8278277,allow all,251672427593,7,7,

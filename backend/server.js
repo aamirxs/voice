@@ -2,9 +2,11 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const { AccessToken } = require('livekit-server-sdk');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -16,23 +18,52 @@ const io = new Server(server, {
 
 const rooms = {};
 
+// ========== LiveKit Token Endpoint ==========
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'APIzora2026stream';
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secretZoraLiveKit2026xRunPlace';
+
+app.post('/api/token', async (req, res) => {
+  try {
+    const { roomId, userName } = req.body;
+    if (!roomId || !userName) {
+      return res.status(400).json({ error: 'roomId and userName are required' });
+    }
+
+    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+      identity: userName + '_' + Date.now().toString(36),
+      name: userName,
+      ttl: '6h',
+    });
+
+    at.addGrant({
+      roomJoin: true,
+      room: roomId,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+
+    const token = await at.toJwt();
+    res.json({ token });
+  } catch (err) {
+    console.error('Token generation failed:', err);
+    res.status(500).json({ error: 'Failed to generate token' });
+  }
+});
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', livekit: true });
+});
+
+// ========== Socket.io — Custom Features Only ==========
+// LiveKit handles ALL video/audio/screen share natively.
+// Socket.io is only used for: chat, emoji, sounds, whiteboard, host actions.
+
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
   let currentRoomId = null;
   let currentUserName = null;
-
-  // WebRTC signaling — registered ONCE per connection (not per join-room)
-  socket.on('offer', (payload) => {
-    io.to(payload.target).emit('offer', payload);
-  });
-
-  socket.on('answer', (payload) => {
-    io.to(payload.target).emit('answer', payload);
-  });
-
-  socket.on('ice-candidate', (payload) => {
-    io.to(payload.target).emit('ice-candidate', payload);
-  });
 
   socket.on('join-room', (roomId, userName, avatarUrl, userToken) => {
     socket.join(roomId);
@@ -54,7 +85,6 @@ io.on('connection', (socket) => {
     
     rooms[roomId].participants.push({ id: socket.id, token: userToken, name: userName });
     
-    // Send existing whiteboard state to the newly joined user
     if (rooms[roomId].whiteboardState.length > 0) {
       socket.emit('whiteboard-state', rooms[roomId].whiteboardState);
     }
@@ -63,10 +93,9 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('update-host', rooms[roomId].currentHostSocket);
   });
     
-  // Custom events
+  // Sound effects
   socket.on('play-sound', (data) => {
     if (!currentRoomId) return;
-    // Forward the full payload consistently
     socket.to(currentRoomId).emit('play-sound', { 
       userId: socket.id, 
       soundData: data.soundData, 
@@ -74,11 +103,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('toggle-media', (type, isMuted) => {
-    if (!currentRoomId) return;
-    socket.to(currentRoomId).emit('user-toggled-media', { userId: socket.id, type, isMuted });
-  });
-
+  // Emoji reactions
   socket.on('emoji-reaction', (data) => {
     if (!currentRoomId) return;
     socket.to(currentRoomId).emit('emoji-reaction', { userId: socket.id, emoji: data.emoji, senderName: data.senderName });
@@ -123,7 +148,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Request whiteboard state (for re-opening whiteboard within same session)
   socket.on('request-whiteboard-state', () => {
     if (!currentRoomId || !rooms[currentRoomId]) return;
     if (rooms[currentRoomId].whiteboardState.length > 0) {
@@ -164,5 +188,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`Signaling server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT} (LiveKit SFU mode)`);
 });

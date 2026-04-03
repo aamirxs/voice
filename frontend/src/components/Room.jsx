@@ -1,18 +1,25 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Camera, Mic, MicOff, PhoneOff, Monitor, MonitorOff, Video, VideoOff, MessageCircle, MessageSquare, Settings, Users, LayoutGrid, MonitorPlay, Sparkles, Smile, PenTool, Check, Link2 } from 'lucide-react';
 import { io } from 'socket.io-client';
+import { Room as LKRoom, RoomEvent, Track, ConnectionState } from 'livekit-client';
 import useAudioVolume from '../hooks/useAudioVolume';
 import VideoTile from './VideoTile';
 import Soundbar from './Soundbar';
 import Whiteboard from './Whiteboard';
 import Controls from './Controls';
 import ChatPanel from './ChatPanel';
-import { getAudioContext } from '../hooks/useAudioVolume';
 
 const SOCKET_SERVER_URL = import.meta.env.VITE_SOCKET_URL || (
   window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:5000'
     : window.location.origin
+);
+
+// LiveKit WebSocket URL — connects via Nginx proxy in production, direct in dev
+const LIVEKIT_URL = import.meta.env.VITE_LIVEKIT_URL || (
+  window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'ws://localhost:7880'
+    : `wss://${window.location.hostname}/livekit/`
 );
 
 const EMOJI_LIST = ['👍', '👏', '😂', '❤️', '🎉', '🔥', '😮', '😢'];
@@ -32,6 +39,7 @@ const getSoundEmoji = (soundData) => {
 };
 
 const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) => {
+  // Peer tracks from LiveKit: { participantIdentity: { videoTrack, audioTrack, screenTrack, screenAudioTrack } }
   const [peers, setPeers] = useState({});
   const [peerNames, setPeerNames] = useState({});
   const [peerAvatars, setPeerAvatars] = useState({});
@@ -58,7 +66,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
   const [layoutMode, setLayoutMode] = useState('auto');
 
   // Multi-presenter and pinning tracking
-  const [presenterIds, setPresenterIds] = useState([]); // array of 'local' or peer ids
+  const [presenterIds, setPresenterIds] = useState([]);
   const [pinnedUser, setPinnedUser] = useState(null);
 
   // Audio mute tracking
@@ -66,10 +74,10 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
 
   // Clear pinned user if they leave
   useEffect(() => {
-    if (pinnedUser && pinnedUser !== 'local' && !peers[pinnedUser]) {
+    if (pinnedUser && pinnedUser !== 'local' && !peerNames[pinnedUser]) {
       setPinnedUser(null);
     }
-  }, [peers, pinnedUser]);
+  }, [peerNames, pinnedUser]);
 
   // Emoji reactions
   const [floatingEmojis, setFloatingEmojis] = useState([]);
@@ -89,61 +97,31 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
   const isSpeaking = useAudioVolume(localStream);
 
   const socketRef = useRef();
-  const peersRef = useRef({});
-  
+  const lkRoomRef = useRef(null);
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
-  const mixedAudioContextRef = useRef(null);
-  const iceCandidateQueue = useRef({});
 
+  // ========== DEVICE SWITCHING ==========
   const switchDevice = async (kind, deviceId) => {
     try {
-      if (kind === 'audio') setSelectedAudioId(deviceId);
-      if (kind === 'video') setSelectedVideoId(deviceId);
-
-      const constraints = {
-        video: kind === 'video' ? { deviceId: { exact: deviceId } } : (isVideoOffRef.current ? false : true),
-        audio: kind === 'audio' ? { deviceId: { exact: deviceId } } : true
-      };
-
-      const newStream = await navigator.mediaDevices.getUserMedia(constraints);
-      const newTrack = kind === 'video' ? newStream.getVideoTracks()[0] : newStream.getAudioTracks()[0];
-      
-      const oldTrack = kind === 'video' 
-        ? localStreamRef.current?.getVideoTracks()[0] 
-        : localStreamRef.current?.getAudioTracks()[0];
-
-      if (oldTrack) oldTrack.stop();
-
-      if (kind === 'audio') newTrack.enabled = !isMuted;
-      if (kind === 'video') newTrack.enabled = !isVideoOffRef.current;
-
-      if (localStreamRef.current) {
-        if (oldTrack) localStreamRef.current.removeTrack(oldTrack);
-        localStreamRef.current.addTrack(newTrack);
-        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-      }
-
-      // Replace track for all peers
-      for (const peerId in peersRef.current) {
-        const sender = peersRef.current[peerId].getSenders().find(s => s.track?.kind === kind);
-        if (sender) {
-          sender.replaceTrack(newTrack).catch(e => console.warn(e));
+      if (kind === 'audio') {
+        setSelectedAudioId(deviceId);
+        if (lkRoomRef.current) {
+          await lkRoomRef.current.switchActiveDevice('audioinput', deviceId);
         }
       }
-      
+      if (kind === 'video') {
+        setSelectedVideoId(deviceId);
+        if (lkRoomRef.current) {
+          await lkRoomRef.current.switchActiveDevice('videoinput', deviceId);
+        }
+      }
     } catch (err) {
       console.error('Error switching device:', err);
     }
   };
 
-  const stopMediaStream = (stream) => {
-    if (stream) stream.getTracks().forEach(t => t.stop());
-  };
-
-  // ========== CALLBACK REFS (fixes the dual-ref bug) ==========
-  // Instead of storing a React ref and hoping srcObject stays set,
-  // use callback refs that set srcObject every time the DOM element mounts.
+  // ========== CALLBACK REFS FOR LOCAL VIDEO ==========
   const localCameraCallback = useCallback((videoEl) => {
     if (videoEl && localStreamRef.current) {
       videoEl.srcObject = localStreamRef.current;
@@ -189,171 +167,272 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     }
   }, [userName, spawnEmoji]);
 
+  // ========== HELPER: Build MediaStream from LiveKit participant tracks ==========
+  const buildPeerStream = useCallback((participant) => {
+    const tracks = [];
+    participant.trackPublications.forEach((pub) => {
+      if (pub.track && pub.isSubscribed) {
+        // Only include camera video and mic audio (not screen share)
+        if (pub.source === Track.Source.Camera || pub.source === Track.Source.Microphone) {
+          tracks.push(pub.track.mediaStreamTrack);
+        }
+      }
+    });
+    return tracks.length > 0 ? new MediaStream(tracks) : null;
+  }, []);
+
+  const buildScreenStream = useCallback((participant) => {
+    const tracks = [];
+    participant.trackPublications.forEach((pub) => {
+      if (pub.track && pub.isSubscribed) {
+        if (pub.source === Track.Source.ScreenShare || pub.source === Track.Source.ScreenShareAudio) {
+          tracks.push(pub.track.mediaStreamTrack);
+        }
+      }
+    });
+    return tracks.length > 0 ? new MediaStream(tracks) : null;
+  }, []);
+
+  // ========== HELPER: Refresh all peer states from LiveKit room ==========
+  const refreshPeerStates = useCallback(() => {
+    const room = lkRoomRef.current;
+    if (!room) return;
+
+    const newPeers = {};
+    const newNames = {};
+    const newVideoStates = {};
+    const newAudioStates = {};
+    const newPresenters = [...(isScreenSharingRef.current ? ['local'] : [])];
+
+    room.remoteParticipants.forEach((participant, identity) => {
+      const pId = identity;
+      newNames[pId] = participant.name || participant.identity;
+
+      // Build camera+mic stream for this participant
+      const cameraStream = buildPeerStream(participant);
+      if (cameraStream) {
+        newPeers[pId] = cameraStream;
+      }
+
+      // Check if they have a screen share
+      const screenStream = buildScreenStream(participant);
+      if (screenStream) {
+        // Use a separate key for screen share
+        newPeers[pId + '_screen'] = screenStream;
+        if (!newPresenters.includes(pId)) newPresenters.push(pId);
+      }
+
+      // Track mute states
+      const camPub = participant.getTrackPublication(Track.Source.Camera);
+      const micPub = participant.getTrackPublication(Track.Source.Microphone);
+      newVideoStates[pId] = !camPub || camPub.isMuted || !camPub.isSubscribed;
+      newAudioStates[pId] = !micPub || micPub.isMuted || !micPub.isSubscribed;
+    });
+
+    setPeers(newPeers);
+    setPeerNames(prev => ({ ...prev, ...newNames }));
+    setPeerVideoStates(newVideoStates);
+    setPeerAudioStates(newAudioStates);
+    setPresenterIds(newPresenters);
+  }, [buildPeerStream, buildScreenStream]);
+
+  // ========== MAIN EFFECT: LIVEKIT + SOCKET.IO SETUP ==========
   useEffect(() => {
     let isMounted = true;
+
+    // ---- Socket.io for custom features ----
     const socket = io(SOCKET_SERVER_URL);
     socketRef.current = socket;
-    
-    const initRoom = (stream) => {
-      if (!isMounted) return;
-      
+
+    socket.on('connect', () => {
       socket.emit('join-room', roomId, userName, avatarUrl, userToken);
+    });
 
-      socket.on('update-host', (newHostId) => {
-        setHostId(newHostId);
-      });
+    socket.on('update-host', (newHostId) => {
+      setHostId(newHostId);
+    });
 
-      socket.on('force-mute', () => {
-        if (!isMutedRef.current) {
+    socket.on('force-mute', () => {
+      if (!isMutedRef.current && lkRoomRef.current) {
+        setIsMuted(true);
+        isMutedRef.current = true;
+        lkRoomRef.current.localParticipant.setMicrophoneEnabled(false);
+      }
+    });
+
+    socket.on('force-kick', () => {
+      alert("You have been kicked from the room by the host.");
+      onLeave();
+    });
+
+    socket.on('user-connected', (userId, newUserName, newAvatarUrl) => {
+      setPeerAvatars(prev => ({ ...prev, [userId]: newAvatarUrl }));
+    });
+
+    socket.on('user-disconnected', (userId) => {
+      setPeerAvatars(prev => { const n = {...prev}; delete n[userId]; return n; });
+    });
+
+    socket.on('play-sound', (payload) => {
+      playSound(payload.soundData);
+      spawnEmoji(getSoundEmoji(payload.soundData), payload.senderName || 'Someone');
+    });
+
+    socket.on('emoji-reaction', (data) => {
+      spawnEmoji(data.emoji, data.senderName);
+    });
+
+    socket.on('chat-message', () => {
+      if (!isChatOpenRef.current) {
+        setUnreadChat(prev => prev + 1);
+      }
+    });
+
+    // ---- LiveKit for video/audio ----
+    const connectLiveKit = async () => {
+      try {
+        // Get token from our backend
+        const tokenUrl = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+          ? 'http://localhost:5000/api/token'
+          : `${window.location.origin}/api/token`;
+
+        const res = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ roomId, userName }),
+        });
+        const { token } = await res.json();
+        if (!isMounted) return;
+
+        const room = new LKRoom({
+          adaptiveStream: true,
+          dynacast: true,
+          videoCaptureDefaults: {
+            resolution: { width: 1280, height: 720, frameRate: 30 },
+          },
+          audioCaptureDefaults: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        lkRoomRef.current = room;
+
+        // ---- LiveKit Event Handlers ----
+        room.on(RoomEvent.TrackSubscribed, () => {
+          if (isMounted) refreshPeerStates();
+        });
+
+        room.on(RoomEvent.TrackUnsubscribed, () => {
+          if (isMounted) refreshPeerStates();
+        });
+
+        room.on(RoomEvent.TrackMuted, () => {
+          if (isMounted) refreshPeerStates();
+        });
+
+        room.on(RoomEvent.TrackUnmuted, () => {
+          if (isMounted) refreshPeerStates();
+        });
+
+        room.on(RoomEvent.ParticipantConnected, (participant) => {
+          if (isMounted) {
+            setPeerNames(prev => ({ ...prev, [participant.identity]: participant.name || participant.identity }));
+            refreshPeerStates();
+          }
+        });
+
+        room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+          if (isMounted) {
+            const pId = participant.identity;
+            setPeers(prev => {
+              const n = { ...prev };
+              delete n[pId];
+              delete n[pId + '_screen'];
+              return n;
+            });
+            setPeerNames(prev => { const n = {...prev}; delete n[pId]; return n; });
+            setPeerVideoStates(prev => { const n = {...prev}; delete n[pId]; return n; });
+            setPeerAudioStates(prev => { const n = {...prev}; delete n[pId]; return n; });
+            setPresenterIds(prev => prev.filter(id => id !== pId));
+          }
+        });
+
+        room.on(RoomEvent.LocalTrackPublished, () => {
+          if (isMounted) {
+            // Update local stream for speaking detection
+            const tracks = [];
+            room.localParticipant.trackPublications.forEach((pub) => {
+              if (pub.track && (pub.source === Track.Source.Camera || pub.source === Track.Source.Microphone)) {
+                tracks.push(pub.track.mediaStreamTrack);
+              }
+            });
+            const stream = tracks.length > 0 ? new MediaStream(tracks) : null;
+            localStreamRef.current = stream;
+            setLocalStream(stream);
+          }
+        });
+
+        room.on(RoomEvent.LocalTrackUnpublished, () => {
+          if (isMounted) {
+            const tracks = [];
+            room.localParticipant.trackPublications.forEach((pub) => {
+              if (pub.track && (pub.source === Track.Source.Camera || pub.source === Track.Source.Microphone)) {
+                tracks.push(pub.track.mediaStreamTrack);
+              }
+            });
+            const stream = tracks.length > 0 ? new MediaStream(tracks) : null;
+            localStreamRef.current = stream;
+            setLocalStream(stream);
+          }
+        });
+
+        // Connect to LiveKit room
+        await room.connect(LIVEKIT_URL, token);
+        if (!isMounted) { room.disconnect(); return; }
+
+        // Enable camera and microphone
+        try {
+          await room.localParticipant.enableCameraAndMicrophone();
+          setMediaError(null);
+          
+          // Build local stream for speaking indicator
+          const tracks = [];
+          room.localParticipant.trackPublications.forEach((pub) => {
+            if (pub.track && (pub.source === Track.Source.Camera || pub.source === Track.Source.Microphone)) {
+              tracks.push(pub.track.mediaStreamTrack);
+            }
+          });
+          const stream = tracks.length > 0 ? new MediaStream(tracks) : null;
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+        } catch (err) {
+          console.error('Failed to enable camera/mic:', err);
+          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            setMediaError('Camera/Microphone permission was denied. Please allow access and reload.');
+          } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+            setMediaError('No camera or microphone found. Please connect a device.');
+          } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+            setMediaError('Camera/Mic is already in use by another app. Close it and reload.');
+          } else {
+            setMediaError(`Media error: ${err.message}`);
+          }
+          setIsVideoOff(true);
+          isVideoOffRef.current = true;
           setIsMuted(true);
           isMutedRef.current = true;
-          const tracks = localStreamRef.current?.getAudioTracks() || [];
-          tracks.forEach(track => { track.enabled = false; });
-          socket.emit('toggle-media', 'audio', true);
         }
-      });
 
-      socket.on('force-kick', () => {
-        alert("You have been kicked from the room by the host.");
-        onLeave();
-      });
+        // Initial state refresh for any existing participants
+        refreshPeerStates();
 
-      socket.on('user-toggled-media', (payload) => {
-        if (payload.type === 'video') {
-           setPeerVideoStates(prev => ({ ...prev, [payload.userId]: payload.isMuted }));
-        } else if (payload.type === 'audio') {
-           setPeerAudioStates(prev => ({ ...prev, [payload.userId]: payload.isMuted }));
-        } else if (payload.type === 'screen') {
-           if (payload.isMuted) {
-             setPresenterIds(prev => prev.includes(payload.userId) ? prev : [...prev, payload.userId]);
-             // Force-refresh the peer's MediaStream so the <video> element picks up
-             // the new screen-share track that arrived via replaceTrack().
-             // replaceTrack does NOT fire ontrack, so without this the video stays black.
-             setTimeout(() => {
-               setPeers(prev => {
-                 if (!prev[payload.userId]) return prev;
-                 const freshStream = new MediaStream(prev[payload.userId].getTracks());
-                 return { ...prev, [payload.userId]: freshStream };
-               });
-             }, 300);
-           } else {
-             setPresenterIds(prev => prev.filter(id => id !== payload.userId));
-             // Also refresh stream when screen share stops so video element shows camera again
-             setTimeout(() => {
-               setPeers(prev => {
-                 if (!prev[payload.userId]) return prev;
-                 const freshStream = new MediaStream(prev[payload.userId].getTracks());
-                 return { ...prev, [payload.userId]: freshStream };
-               });
-             }, 300);
-           }
-        }
-      });
-
-      socket.on('user-connected', (userId, newUserName, newAvatarUrl) => {
-        setPeerNames(prev => ({ ...prev, [userId]: newUserName }));
-        setPeerAvatars(prev => ({ ...prev, [userId]: newAvatarUrl }));
-        socket.emit('toggle-media', 'video', isVideoOffRef.current);
-        socket.emit('toggle-media', 'audio', isMuted);
-        if (isScreenSharingRef.current) socket.emit('toggle-media', 'screen', true);
-        
-        const peerConnection = createPeerConnection(userId, stream);
-        peersRef.current[userId] = peerConnection;
-        iceCandidateQueue.current[userId] = [];
-        
-        peerConnection.createOffer()
-          .then(offer => peerConnection.setLocalDescription(offer))
-          .then(() => {
-            socket.emit('offer', { target: userId, caller: socket.id, callerName: userName, callerAvatar: avatarUrl, sdp: peerConnection.localDescription });
-          });
-      });
-
-      socket.on('offer', (payload) => {
-        setPeerNames(prev => ({ ...prev, [payload.caller]: payload.callerName }));
-        setPeerAvatars(prev => ({ ...prev, [payload.caller]: payload.callerAvatar }));
-        socket.emit('toggle-media', 'video', isVideoOffRef.current);
-        socket.emit('toggle-media', 'audio', isMuted);
-        if (isScreenSharingRef.current) socket.emit('toggle-media', 'screen', true);
-
-        const peerConnection = createPeerConnection(payload.caller, stream);
-        peersRef.current[payload.caller] = peerConnection;
-        iceCandidateQueue.current[payload.caller] = [];
-        
-        peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp))
-          .then(() => {
-             const queue = iceCandidateQueue.current[payload.caller] || [];
-             queue.forEach(candidate => peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e)));
-             iceCandidateQueue.current[payload.caller] = [];
-             return peerConnection.createAnswer();
-          })
-          .then(answer => peerConnection.setLocalDescription(answer))
-          .then(() => {
-            socket.emit('answer', { target: payload.caller, caller: socket.id, sdp: peerConnection.localDescription });
-          });
-      });
-
-      socket.on('answer', (payload) => {
-        const item = peersRef.current[payload.caller];
-        if (item) {
-           item.setRemoteDescription(new RTCSessionDescription(payload.sdp))
-             .then(() => {
-                const queue = iceCandidateQueue.current[payload.caller] || [];
-                queue.forEach(candidate => item.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn(e)));
-                iceCandidateQueue.current[payload.caller] = [];
-             })
-             .catch(e => console.warn(e));
-        }
-      });
-
-      socket.on('ice-candidate', (payload) => {
-        const item = peersRef.current[payload.caller];
-        if (item) {
-          if (!item.remoteDescription || !item.remoteDescription.type) {
-             if (!iceCandidateQueue.current[payload.caller]) iceCandidateQueue.current[payload.caller] = [];
-             iceCandidateQueue.current[payload.caller].push(payload.candidate);
-          } else {
-             item.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(e => console.warn(e));
-          }
-        }
-      });
-
-      socket.on('user-disconnected', (userId) => {
-        if (peersRef.current[userId]) {
-          peersRef.current[userId].close();
-        }
-        setPeers((prevPeers) => {
-          const newPeers = { ...prevPeers };
-          delete newPeers[userId];
-          return newPeers;
-        });
-        setPeerNames(prev => { const n = {...prev}; delete n[userId]; return n; });
-        setPeerAvatars(prev => { const n = {...prev}; delete n[userId]; return n; });
-        setPeerVideoStates(prev => { const n = {...prev}; delete n[userId]; return n; });
-        setPeerAudioStates(prev => { const n = {...prev}; delete n[userId]; return n; });
-        setPresenterIds(prev => prev.filter(id => id !== userId));
-        delete peersRef.current[userId];
-        delete iceCandidateQueue.current[userId];
-      });
-
-      socket.on('play-sound', (payload) => {
-         // Server sends { userId, soundData, senderName }
-         playSound(payload.soundData);
-         spawnEmoji(getSoundEmoji(payload.soundData), payload.senderName || 'Someone');
-      });
-
-      // Emoji reactions from peers
-      socket.on('emoji-reaction', (data) => {
-        spawnEmoji(data.emoji, data.senderName);
-      });
-
-      // Unread chat counter
-      socket.on('chat-message', () => {
-        if (!isChatOpenRef.current) {
-          setUnreadChat(prev => prev + 1);
-        }
-      });
+      } catch (err) {
+        console.error('LiveKit connection failed:', err);
+        if (isMounted) setMediaError(`Connection failed: ${err.message}. Please reload.`);
+      }
     };
 
+    // Enumerate devices
     const updateDeviceList = async () => {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -365,302 +444,99 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
         console.warn("Failed to enumerate devices:", err);
       }
     };
-
     updateDeviceList();
     navigator.mediaDevices.addEventListener('devicechange', updateDeviceList);
 
-    navigator.mediaDevices.getUserMedia({ 
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30 }
-      }, 
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        sampleRate: 48000,
-        // Advanced WebRTC noise cancellation constraints (WebKit/Blink)
-        googEchoCancellation: true,
-        googAutoGainControl: true,
-        googNoiseSuppression: true,
-        googHighpassFilter: true,
-        googTypingNoiseDetection: true
-      }
-    }).then((stream) => {
-      if (!isMounted) {
-         stopMediaStream(stream);
-         return;
-      }
-      localStreamRef.current = stream;
-      setLocalStream(stream);
-      setMediaError(null);
-      initRoom(stream);
-    }).catch(err => {
-      console.error('Failed to get local stream:', err);
-      if (isMounted) {
-        // Set error state so user knows what happened
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          setMediaError('Camera/Microphone permission was denied. Please allow access and reload.');
-        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-          setMediaError('No camera or microphone found. Please connect a device.');
-        } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-          setMediaError('Camera/Mic is already in use by another app. Close it and reload.');
-        } else {
-          setMediaError(`Media error: ${err.message}`);
-        }
-        // Still join the room so user can at least chat/listen
-        setIsVideoOff(true);
-        isVideoOffRef.current = true;
-        setIsMuted(true);
-        initRoom(null);
-      }
-    });
+    connectLiveKit();
 
     return () => {
       isMounted = false;
-      stopMediaStream(localStreamRef.current);
-      stopMediaStream(screenStreamRef.current);
-      Object.values(peersRef.current).forEach(pc => {
-        try { pc.close(); } catch (e) { /* ignore */ }
-      });
+      navigator.mediaDevices.removeEventListener('devicechange', updateDeviceList);
+      if (lkRoomRef.current) {
+        lkRoomRef.current.disconnect();
+        lkRoomRef.current = null;
+      }
       socket.disconnect();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const createPeerConnection = (partnerId, stream) => {
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        // Free TURN relay servers for NAT traversal across different networks
-        {
-          urls: 'turn:openrelay.metered.ca:80',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-      ],
-      iceCandidatePoolSize: 10,
-    });
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && socketRef.current) {
-        socketRef.current.emit('ice-candidate', { target: partnerId, caller: socketRef.current.id, candidate: event.candidate });
-      }
-    };
-
-    pc.ontrack = (event) => {
-      const incomingTrack = event.track;
-      
-      // Listen for track unmute — this fires when replaceTrack sends new content
-      // and when tracks initially become active
-      incomingTrack.onunmute = () => {
-        setPeers(oldPeers => {
-          const existing = oldPeers[partnerId];
-          if (existing) {
-            // Re-clone so React sees a new object → video element re-sets srcObject
-            return { ...oldPeers, [partnerId]: new MediaStream(existing.getTracks()) };
-          }
-          return oldPeers;
-        });
-      };
-
-      setPeers(oldPeers => {
-        // ALWAYS return a new object so React re-renders.
-        // Clone the MediaStream to force HTMLMediaElement to recognize the new tracks.
-        const newStream = new MediaStream(event.streams[0].getTracks());
-        return { ...oldPeers, [partnerId]: newStream };
-      });
-    };
-
-    if (stream) {
-       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-    } else {
-      // No local media — still request to receive remote tracks
-      try {
-        pc.addTransceiver('video', { direction: 'recvonly' });
-        pc.addTransceiver('audio', { direction: 'recvonly' });
-      } catch (err) {
-        console.warn('Failed to add recvonly transceivers:', err);
-      }
-    }
-    return pc;
-  };
-
+  // ========== MEDIA CONTROLS (Simple with LiveKit!) ==========
   const toggleMute = () => {
-    if (!localStreamRef.current || localStreamRef.current.getAudioTracks().length === 0) {
-      console.warn('No audio track available to toggle');
-      return;
-    }
+    if (!lkRoomRef.current) return;
     const newState = !isMuted;
     setIsMuted(newState);
     isMutedRef.current = newState;
-    localStreamRef.current.getAudioTracks()[0].enabled = !newState;
-    if (socketRef.current) socketRef.current.emit('toggle-media', 'audio', newState);
+    lkRoomRef.current.localParticipant.setMicrophoneEnabled(!newState);
   };
 
   const toggleVideo = async () => {
+    if (!lkRoomRef.current) return;
     const newState = !isVideoOff;
     setIsVideoOff(newState);
     isVideoOffRef.current = newState;
-
-    if (newState) {
-      // Turning camera OFF: stop the track AND remove it from the stream
-      const videoTracks = localStreamRef.current?.getVideoTracks() || [];
-      videoTracks.forEach(track => {
-        track.stop();
-        if (localStreamRef.current) localStreamRef.current.removeTrack(track);
-      });
-      // Force React to re-render the video element (so it unmounts and releases srcObject)
-      setLocalStream(localStreamRef.current ? new MediaStream(localStreamRef.current.getTracks()) : null);
-    } else {
-      // Turning camera ON: re-acquire the video track from hardware
-      try {
-        const newStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
-        });
-        const newVideoTrack = newStream.getVideoTracks()[0];
-
-        // Replace the old (stopped) track in the local stream
-        const oldVideoTrack = localStreamRef.current?.getVideoTracks()[0];
-        if (oldVideoTrack) localStreamRef.current.removeTrack(oldVideoTrack);
-        if (localStreamRef.current) localStreamRef.current.addTrack(newVideoTrack);
-        
-        // Trigger React re-render so the <video> element picks up the new track
-        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-
-        // Replace the track in all active peer connections so remote users see your camera again
-        for (let peerId in peersRef.current) {
-          const senders = peersRef.current[peerId].getSenders();
-          // Find the video sender — may have a null track if camera was off
-          const sender = senders.find(s => s.track?.kind === 'video') 
-                      || senders.find(s => s.track === null && !senders.find(a => a.track?.kind === 'audio' && a === s));
-          if (sender) {
-            sender.replaceTrack(newVideoTrack).catch(e => console.warn('replaceTrack failed:', e));
-          }
-        }
-      } catch (err) {
-        console.warn('Failed to re-acquire camera:', err);
-        // Revert state if camera can't be re-opened
-        setIsVideoOff(true);
-        isVideoOffRef.current = true;
+    
+    await lkRoomRef.current.localParticipant.setCameraEnabled(!newState);
+    
+    // Update local stream for display
+    const tracks = [];
+    lkRoomRef.current.localParticipant.trackPublications.forEach((pub) => {
+      if (pub.track && (pub.source === Track.Source.Camera || pub.source === Track.Source.Microphone)) {
+        tracks.push(pub.track.mediaStreamTrack);
       }
-    }
-
-    if (socketRef.current) socketRef.current.emit('toggle-media', 'video', newState);
+    });
+    const stream = tracks.length > 0 ? new MediaStream(tracks) : null;
+    localStreamRef.current = stream;
+    setLocalStream(stream);
   };
 
   const toggleScreenShare = async () => {
+    if (!lkRoomRef.current) return;
+    
     if (!isScreenSharing) {
       try {
-        const screen = await navigator.mediaDevices.getDisplayMedia({ 
+        await lkRoomRef.current.localParticipant.setScreenShareEnabled(true, {
+          audio: true,
           video: {
             displaySurface: 'monitor',
             frameRate: { ideal: 60 },
-            width: { ideal: 1920, max: 1920 },
-            height: { ideal: 1080, max: 1080 }
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
           },
-          audio: {
-             echoCancellation: false,
-             noiseSuppression: false,
-             sampleRate: 44100
-          }
         });
-        screenStreamRef.current = screen;
-        setScreenStream(screen);
         setIsScreenSharing(true);
         isScreenSharingRef.current = true;
         setPresenterIds(prev => prev.includes('local') ? prev : [...prev, 'local']);
-        if (socketRef.current) socketRef.current.emit('toggle-media', 'screen', true);
-        
-        const videoTrack = screen.getVideoTracks()[0];
-        const screenAudio = screen.getAudioTracks()[0];
-        const micAudio = localStreamRef.current?.getAudioTracks()[0];
-        
-        let trackToSend = screenAudio || micAudio;
 
-        if (screenAudio && micAudio) {
-           const audioCtx = getAudioContext();
-           if (audioCtx) {
-             const dest = audioCtx.createMediaStreamDestination();
-             const micSource = audioCtx.createMediaStreamSource(new MediaStream([micAudio]));
-             const screenSource = audioCtx.createMediaStreamSource(new MediaStream([screenAudio]));
-             
-             micSource.connect(dest);
-             screenSource.connect(dest);
-             
-             mixedAudioContextRef.current = { dest, micSource, screenSource };
-             trackToSend = dest.stream.getAudioTracks()[0];
-           }
+        // Get the screen share track for local preview
+        const screenPub = lkRoomRef.current.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+        if (screenPub && screenPub.track) {
+          const screenMediaStream = new MediaStream([screenPub.track.mediaStreamTrack]);
+          screenStreamRef.current = screenMediaStream;
+          setScreenStream(screenMediaStream);
+
+          // Listen for track end (user clicks "Stop sharing" in browser UI)
+          screenPub.track.mediaStreamTrack.onended = () => {
+            stopScreenShare();
+          };
         }
-
-        for (let peerId in peersRef.current) {
-          const senders = peersRef.current[peerId].getSenders();
-          // Find video sender — track may be null if camera was turned off
-          const senderVid = senders.find(s => s.track?.kind === 'video') 
-                         || senders.find(s => s.track === null);
-          if (senderVid && videoTrack) senderVid.replaceTrack(videoTrack).catch(e=>console.warn(e));
-
-          if (trackToSend) {
-             const senderAud = senders.find(s => s.track?.kind === 'audio');
-             if (senderAud) senderAud.replaceTrack(trackToSend).catch(e=>console.warn(e));
-          }
-        }
-
-        videoTrack.onended = () => {
-          stopScreenShare(screen);
-        };
       } catch (err) {
         console.error("Error sharing screen", err);
       }
     } else {
-      stopScreenShare(screenStreamRef.current);
+      stopScreenShare();
     }
   };
   
-  const stopScreenShare = (streamToStop) => {
-     stopMediaStream(streamToStop);
-     setIsScreenSharing(false);
-     isScreenSharingRef.current = false;
-     setScreenStream(null);
-     screenStreamRef.current = null;
-     setPresenterIds(prev => prev.filter(id => id !== 'local'));
-     if (socketRef.current) socketRef.current.emit('toggle-media', 'screen', false);
-
-     if (mixedAudioContextRef.current) {
-         try {
-           mixedAudioContextRef.current.micSource.disconnect();
-           mixedAudioContextRef.current.screenSource.disconnect();
-         } catch(e) {}
-         mixedAudioContextRef.current = null;
-     }
-     
-     // Restore camera track to peers (may be null if camera was off before screen share)
-     const videoTrack = localStreamRef.current?.getVideoTracks()[0];
-     const audioTrack = localStreamRef.current?.getAudioTracks()[0];
-     for (let peerId in peersRef.current) {
-        const senders = peersRef.current[peerId].getSenders();
-        // Current sender is sending the screen share video track — swap back to camera (or null if cam off)
-        const senderVid = senders.find(s => s.track?.kind === 'video')
-                       || senders.find(s => s.track === null);
-        if (senderVid) {
-           senderVid.replaceTrack(videoTrack || null).catch(e=>console.warn(e));
-        }
-        const senderAud = senders.find(s => s.track?.kind === 'audio');
-        if (senderAud && audioTrack) {
-           senderAud.replaceTrack(audioTrack).catch(e=>console.warn(e));
-        }
-     }
+  const stopScreenShare = async () => {
+    if (!lkRoomRef.current) return;
+    try {
+      await lkRoomRef.current.localParticipant.setScreenShareEnabled(false);
+    } catch(e) {}
+    setIsScreenSharing(false);
+    isScreenSharingRef.current = false;
+    setScreenStream(null);
+    screenStreamRef.current = null;
+    setPresenterIds(prev => prev.filter(id => id !== 'local'));
   };
 
   const playSound = (soundData) => {
@@ -688,25 +564,20 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     if (socketRef.current) socketRef.current.emit('play-sound', { soundData, senderName: userName });
   };
 
-  
-  // Decide which user IDs to display. Use peerNames as the source of truth so
-  // users are visible even if their WebRTC stream hasn't arrived yet.
+  // ========== LAYOUT LOGIC ==========
+  // Use peerNames as source of truth for which peers exist
   const peerIds = Object.keys(peerNames);
   const hasPeers = peerIds.length > 0;
   
-  // Derive active layout from layoutMode
   const hasScreenShare = presenterIds.length > 0;
   const activeLayout = (layoutMode === 'auto') 
     ? (isWhiteboardOpen || hasScreenShare || pinnedUser ? 'sidebar' : 'tiled') 
     : (isWhiteboardOpen && layoutMode === 'tiled' ? 'sidebar' : layoutMode);
 
-  // Resolve main stage user (used by sidebar & spotlight)
   const activePresenters = presenterIds;
   const mainStageId = isWhiteboardOpen ? 'whiteboard' : (pinnedUser || (activePresenters.length > 0 ? activePresenters[0] : (peerIds.length > 0 ? peerIds[0] : 'local')));
 
-  // All participant IDs for tiled layout
   const allUserIds = ['local', ...peerIds];
-  // Compute CSS grid columns and rows based on participant count
   const tiledColCount = allUserIds.length <= 1 ? 1 : allUserIds.length <= 4 ? 2 : allUserIds.length <= 9 ? 3 : 4;
   const tiledRowCount = Math.ceil(allUserIds.length / tiledColCount);
 
@@ -724,6 +595,14 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
   };
 
   const isHost = socketRef.current?.id && hostId === socketRef.current.id;
+
+  // Helper: get the correct stream for a peer (screen share if presenting, camera otherwise)
+  const getPeerStream = (id) => {
+    if (presenterIds.includes(id) && peers[id + '_screen']) {
+      return peers[id + '_screen'];
+    }
+    return peers[id];
+  };
 
   return (
     <div className="meeting-container">
@@ -803,7 +682,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
                   </>
                 ) : (
                   <VideoTile 
-                    stream={peers[id]} 
+                    stream={getPeerStream(id)} 
                     userName={getPresenterName(id)} 
                     avatarUrl={peerAvatars[id]}
                     isVideoOff={peerVideoStates[id]}
@@ -878,7 +757,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
                  )
               ) : (
                    <VideoTile 
-                     stream={peers[mainStageId]} 
+                     stream={getPeerStream(mainStageId)} 
                      userName={presenterIds.includes(mainStageId) ? `${getPresenterName(mainStageId)}'s Screen` : `${getPresenterName(mainStageId)} ${pinnedUser === mainStageId ? '(Pinned)' : ''}`}
                      avatarUrl={peerAvatars[mainStageId]}
                      isVideoOff={!presenterIds.includes(mainStageId) && peerVideoStates[mainStageId]} 
@@ -927,7 +806,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
                   return (
                     <div key={id} className="pip-tile" onClick={() => setPinnedUser(id)} style={{ cursor: 'pointer' }} title="Click to pin to Main Stage">
                       <VideoTile 
-                        stream={peers[id]} 
+                        stream={getPeerStream(id)} 
                         userName={presenterIds.includes(id) ? `${getPresenterName(id)}'s Screen` : getPresenterName(id)} 
                         avatarUrl={peerAvatars[id]}
                         isVideoOff={!presenterIds.includes(id) && peerVideoStates[id]}
@@ -970,7 +849,7 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
               </>
             ) : (
               <VideoTile 
-                stream={peers[mainStageId]} 
+                stream={getPeerStream(mainStageId)} 
                 userName={`${getPresenterName(mainStageId)} (Spotlight)`}
                 avatarUrl={peerAvatars[mainStageId]}
                 isVideoOff={peerVideoStates[mainStageId]} 
