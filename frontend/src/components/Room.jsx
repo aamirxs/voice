@@ -475,9 +475,19 @@ const Room = ({ roomId, userName, avatarUrl, userToken, onLeave, shareLink }) =>
     setIsVideoOff(newState);
     isVideoOffRef.current = newState;
     
-    await lkRoomRef.current.localParticipant.setCameraEnabled(!newState);
+    if (newState) {
+      // Turning camera OFF — stop the hardware device so LED turns off
+      const camPub = lkRoomRef.current.localParticipant.getTrackPublication(Track.Source.Camera);
+      if (camPub && camPub.track) {
+        camPub.track.mediaStreamTrack.stop(); // kills the OS camera handle
+      }
+      await lkRoomRef.current.localParticipant.setCameraEnabled(false);
+    } else {
+      // Turning camera ON — LiveKit will request a fresh device
+      await lkRoomRef.current.localParticipant.setCameraEnabled(true);
+    }
     
-    // Update local stream for display
+    // Rebuild local stream for display & speaking indicator
     const tracks = [];
     lkRoomRef.current.localParticipant.trackPublications.forEach((pub) => {
       if (pub.track && (pub.source === Track.Source.Camera || pub.source === Track.Source.Microphone)) {
