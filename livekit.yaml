@@ -4,9 +4,15 @@ rtc:
   port_range_start: 50000
   port_range_end: 60000
   use_external_ip: true
-  node_ip: 13.235.33.196
-  # Skip STUN-based validation (fails on EC2 because instance can't reach its own public IP)
-  validate_external_ip: false
+  # Explicitly set the IP advertised to remote peers via ICE candidates
+  ips:
+    include:
+      - 13.235.33.196/32
+    exclude:
+      - 172.17.0.0/16
+      - 172.18.0.0/16
+      - 10.0.0.0/8
+      - 192.168.0.0/16
   enable_loopback_candidate: true
 keys:
   APIzora2026stream: secretZoraLiveKit2026xRunPlaceStreamRoom99
