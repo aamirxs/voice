@@ -5,9 +5,10 @@ rtc:
   port_range_end: 60000
   use_external_ip: true
   node_ip: 13.235.33.196
-  # Enable TURN for clients behind strict firewalls
+  # Skip STUN-based validation (fails on EC2 because instance can't reach its own public IP)
+  validate_external_ip: false
   enable_loopback_candidate: true
 keys:
-  APIzora2026stream: secretZoraLiveKit2026xRunPlace
+  APIzora2026stream: secretZoraLiveKit2026xRunPlaceStreamRoom99
 logging:
   level: info

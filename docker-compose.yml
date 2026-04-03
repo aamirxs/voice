@@ -17,7 +17,7 @@ services:
     environment:
       - PORT=5000
       - LIVEKIT_API_KEY=APIzora2026stream
-      - LIVEKIT_API_SECRET=secretZoraLiveKit2026xRunPlace
+      - LIVEKIT_API_SECRET=secretZoraLiveKit2026xRunPlaceStreamRoom99
       - LIVEKIT_URL=ws://172.17.0.1:7880
     depends_on:
       - livekit
